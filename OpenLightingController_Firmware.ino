@@ -1,25 +1,213 @@
+//    .------..------..------.
+//    |O.--. ||L.--. ||C.--. |
+//    | :/\: || :/\: || :/\: |
+//    | :\/: || (__) || :\/: |
+//    | '--'O|| '--'L|| '--'C|
+//    `------'`------'`------'
+//    Welcome to the OpenLightingControllerFirmware by L. White.
+//    Last modified 12/04/2026 (DD/MM/YYYY) at 2:29PM AEST
+//    Designed for usage with OpenLightingController Project by L.White, 
+//    a customizable and open-source lighting control board designed to interface with dot2 by MA Lighting.
+
+
+//---------------------------
+//  Welcome to the Library
+//---------------------------
 #include <Keypad.h>
+#include <EEPROM.h>
 
+//---------------------------
+//    Hardware Definitions
+//---------------------------
+
+// Matrix Settings:
+const byte ROWS = 4; //The number of rows in your matrix.
+const byte COLS = 8; //The number of columns in your matrix.
+
+// Map out the physical keyswitch grid to real characters.
+char keys[ROWS][COLS] = {
+  { 0,  1,  2,  3,  4,  5,  6,  7},
+  { 8,  9, 10, 11, 12, 13, 14, 15},
+  {16, 17, 18, 19, 20, 21, 22, 23},
+  {24, 25, 26, 27, 28, 29, 30, 31}
+}
+byte rowPins[ROWS] = {0,1,2,3}; //MATCH TO PCB
+byte colPins[COLS] = {4,5,6,7,8,9,10,11};
+Keypad kpd = Keypad(makeKeymap(keys), rowPins, colPins, ROWS, COLS);
+
+const int PAGE_BUTTON = 29; //The button dedicated to changing pages.
+const int NUM_PAGES = 2; //The number of pages. Less is more!
+
+//Fader settings
+const int numFaders = 10;
+const int faderPins[numFaders] = {A0, A1, A2, A3, A4, A5, A6, A7, A8, A9}; //Change this!!!
+const int FaderThreshold = 2;
+int lastSentValue[numFaders];
+const int deadZone = 4;
+
+
+// Soft Takeover Engine
+int virtualFaders[NUM_PAGES][numFaders]; //Stores the fader value for each page.
+int lastPhysicalPos[numFaders];          // Tracks where the physical fader actually is
+bool faderLocked[numFaders];             //Tracks whether the fader is waiting to catch up.
+
+//Status LED
+const int ledPin=13;
+
+//---------------------------
+//  State and Memory Logic
+//---------------------------
+
+uint8_t buttonGroups[NUM_PAGES][32];
+
+//---------------------------
+//      Intitialization
+//---------------------------
 void setup() {
-  // put your setup code here, to run once:
-  // Keyswitch Matrix Definition:
-  const byte ROWS = 4;
-  const byte COLS = 8;
+  Serial.begin(115200);
+  pinMode(ledPin, OUTPUT);
+  kpd.addEventListener(keypadEvent);
+  analogReadResolution(10);
 
-  char keys[ROWS][COLS] = {
-    {'1','2','3','4','5','6','7','8'},
-    {'9','A','B','C','D','E','F','G'},
-    {'H','I','J','K','L','M','N','O'},
-    {'P','Q','R','S','T','U','V','W'}
-  }; 
+  //Init Fader Engines
+  for(int p=0; p < NUM_PAGES; p++) {
+    for(int f = 0; f < numFaders; f++) {
+      virtualFaders[p][f] = 0;
+    }
+  }
 
-  byte rowPins[ROWS]={0,1,2,3};
-  byte colPins[COLS]={4,5,6,7,8,9,10,11};
+  for(int f=0; f < numFaders; f++) {
+    lastPhysicalPos[f] = analogRead(faderPins[f]) / 8;
+    faderLocked[f] = false;
+  }
 
-  Keypad kpd = Keypad(makeKeymap(keys), rowPins, colPins, ROWS, COLS);
+  //Retrieve Group Logic from EEPROM
+  EEPROM.get(0, buttonGroups);
+  if (buttonGroups[0][0] == 255) {//Reset if blank
+    for(int p=0; p<NUM_PAGES; p++) {
+      for(int i=0; i<32; i++) buttonGroups[p][i] = 0;
+    }
+  }
+  blinkPageLED();
 }
 
-void loop() {
-  // put your main code here, to run repeatedly:
+//---------------------------
+//      Main Engine
+//---------------------------
 
+void loop() { 
+  kpd.getKey();
+  readFaders();
+  if (Serial.available() > 0) processCLI();
+  while(usbMIDI.read()) {}
+}
+
+//---------------------------
+// Fader Logic (soft takeover engine)
+//---------------------------
+
+void readFaders() {
+  for (int i = 0; i < numFaders; i++) {
+    bool isGlobal = (i == 8 || i == 9);
+    int activePage = isGlobal ? 0 : currentPage; 
+  
+    int currentPhysicalPos = analogRead(faderPins[i]) / 8;
+    int targetVirtualPos = virtualFaders[activePage][i]; // Use activePage here
+
+    // Apply deadzone
+    if (currentPhysicalPos < deadZone) currentPhysicalPos = 0;
+    if (currentPhysicalPos > (127 - deadZone)) currentPhysicalPos = 127;
+
+    // Check if fader can be unlocked (Soft Takeover)
+    if (faderLocked[i]) {
+      if ((lastPhysicalPos[i] <= targetVirtualPos && currentPhysicalPos >= targetVirtualPos) ||
+          (lastPhysicalPos[i] >= targetVirtualPos && currentPhysicalPos <= targetVirtualPos)) {
+        faderLocked[i] = false; 
+      }
+    }
+
+    // Send MIDI if unlocked
+    if (!faderLocked[i] && abs(currentPhysicalPos - targetVirtualPos) >= FaderThreshold) {
+      usbMIDI.sendControlChange(i + 1, currentPhysicalPos, activePage + 1);
+      virtualFaders[activePage][i] = currentPhysicalPos; 
+    }
+    lastPhysicalPos[i] = currentPhysicalPos; //Remember this for the next loop
+  }
+}
+
+//---------------------------
+// Matrix Logic (including paging + interlocks)
+//---------------------------
+
+void keypadEvent(KeypadEvent key){
+  int noteNumber = (int)key;
+  KeyState state = kpd.getState(); // Store the state of the key
+
+  if (state == PRESSED) {
+    if (noteNumber == PAGE_BUTTON) {
+      currentPage++;
+      if (currentPage >= NUM_PAGES) currentPage = 0;
+      for (int f=0; f < numFaders; f++) faderLocked[f] = true;
+      blinkPageLED();
+      return; 
+    }
+
+    uint8_t myGroup = buttonGroups[currentPage][noteNumber];
+    int midiChannel = (noteNumber == 31 || noteNumber == 30) ? 1 : currentPage + 1;
+
+    // Interlock logic
+    if (myGroup > 0) {
+      for (int i = 0; i < 32; i++) { // Semicolon fix
+        if (buttonGroups[currentPage][i] == myGroup && i != noteNumber && i != PAGE_BUTTON) {
+          usbMIDI.sendNoteOff(i, 0, midiChannel);
+        }
+      }
+    }
+    usbMIDI.sendNoteOn(noteNumber, 127, midiChannel);
+  } 
+
+  if (state == RELEASED && noteNumber != PAGE_BUTTON)  {
+    int midiChannel = (noteNumber == 31 || noteNumber == 30) ? 1 : currentPage + 1;
+    usbMIDI.sendNoteOff(noteNumber, 0, midiChannel);
+  }
+}
+
+//---------------------------
+//      UI Feedback
+//---------------------------
+
+void blinkPageLED() {
+  for (int i =0; i <= currentPage; i++) {
+    digitalWrite(ledPin, HIGH);
+    delay (150);
+    digitalWrite(ledPin, LOW);
+    delay (150);
+  }
+}
+
+//---------------------------
+//      CLI Interface
+//---------------------------
+
+void processCLI() {
+  String cmd = Serial.readStringUntil('\n')
+  cmd.trim();
+
+  // Format: "G<Page>:<Note>:<Group>" (e.g., "G1:5:2" = Page 1, Button 5, Group 2)
+  if (cmd.startsWith("G")) {
+    int firstColon = cmd.indexOf(':');
+    int secondColon = cmd.indexOf(':', firstColon + 1);
+
+    if (firstColon > 0 && secondColon > 0) {
+      int p = cmd.substring(1, firstColon).toInt() - 1;
+      int note = cmd.substring(firstColon + 1, secondColon).toInt();
+      int group = cmd.substring(secondColon + 1).toInt();
+
+      if (p >=0 && p < NUM_PAGES && note >= 0 && note < 32) {
+        buttonGroups[p][note] = group;
+        EEPROM.put(0, buttonGroups);
+        Serial.println("Group Saved.");
+      } 
+    }
+  }
 }
