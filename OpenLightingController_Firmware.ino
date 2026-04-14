@@ -30,13 +30,14 @@ char keys[ROWS][COLS] = {
   { 8,  9, 10, 11, 12, 13, 14, 15},
   {16, 17, 18, 19, 20, 21, 22, 23},
   {24, 25, 26, 27, 28, 29, 30, 31}
-}
+};
 byte rowPins[ROWS] = {3,2,1,0}; //MATCH TO PCB
 byte colPins[COLS] = {32,31,39,9,8,7,5,4};
 Keypad kpd = Keypad(makeKeymap(keys), rowPins, colPins, ROWS, COLS);
 
 const int PAGE_BUTTON = 29; //The button dedicated to changing pages.
 const int NUM_PAGES = 2; //The number of pages. Less is more!
+int currentPage = 0;
 
 //Fader settings
 const int numFaders = 10;
@@ -128,7 +129,7 @@ void readFaders() {
   for (int i = 0; i < numFaders; i++) {
     bool isGlobal = (i == 8 || i == 9);
     int activePage = isGlobal ? 0 : currentPage; 
-  
+    
     int currentPhysicalPos = analogRead(faderPins[i]) / 8;
     int targetVirtualPos = virtualFaders[activePage][i]; // Use activePage here
 
@@ -208,15 +209,16 @@ void blinkPageLED() {
 //---------------------------
 
 void processCLI() {
-  String cmd = Serial.readStringUntil('\n')
+  String cmd = Serial.readStringUntil('\n');
   cmd.trim();
+
 
   //View Groups CMD:
   if (cmd.equalsIgnoreCase("VG")) {
     Serial.println("====Current Group Assignments====");
     bool found = false;
     for (int p =0; p < NUM_PAGES; p++) {
-      for (int i = 0; i < 32, i++) {
+      for (int i = 0; i < 32; i++) {
         if (buttonGroups[p][i] > 0) {
           Serial.print("Page: "); Serial.print(p + 1);
           Serial.print("  | Button: "); Serial.print(i);
@@ -227,7 +229,7 @@ void processCLI() {
       }
     }
     if (!found) Serial.println("No groups assigned.");
-    Serial.println("---------------------------------")
+    Serial.println("---------------------------------");
   }
 
 
@@ -252,8 +254,10 @@ void processCLI() {
   //Handle Group Deletion
   else if (cmd.startsWith("D")) {
     int colon = cmd.indexOf(':');
-    if (colon < 0) {
+    
+    if (colon > 0) {
       int p = cmd.substring(1, colon).toInt() - 1;
+      int note = cmd.substring(colon + 1).toInt();
       buttonGroups[p][note] = 0;
       EEPROM.put(0, buttonGroups);
       Serial.print("Group cleared for Page "); Serial.print(p+1);
