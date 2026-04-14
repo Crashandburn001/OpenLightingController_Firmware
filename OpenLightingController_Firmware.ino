@@ -31,8 +31,8 @@ char keys[ROWS][COLS] = {
   {16, 17, 18, 19, 20, 21, 22, 23},
   {24, 25, 26, 27, 28, 29, 30, 31}
 }
-byte rowPins[ROWS] = {0,1,2,3}; //MATCH TO PCB
-byte colPins[COLS] = {4,5,6,7,8,9,10,11};
+byte rowPins[ROWS] = {3,2,1,0}; //MATCH TO PCB
+byte colPins[COLS] = {32,31,39,9,8,7,5,4};
 Keypad kpd = Keypad(makeKeymap(keys), rowPins, colPins, ROWS, COLS);
 
 const int PAGE_BUTTON = 29; //The button dedicated to changing pages.
@@ -40,7 +40,7 @@ const int NUM_PAGES = 2; //The number of pages. Less is more!
 
 //Fader settings
 const int numFaders = 10;
-const int faderPins[numFaders] = {A0, A1, A2, A3, A4, A5, A6, A7, A8, A9}; //Change this!!!
+const int faderPins[numFaders] = {A14, A15, A2, A3, A4, A5, A6, A7, A8, A9}; //Change this!!!
 const int FaderThreshold = 2;
 int lastSentValue[numFaders];
 const int deadZone = 4;
@@ -89,6 +89,24 @@ void setup() {
     }
   }
   blinkPageLED();
+
+
+  Serial.println("====Status Report====");
+  for (int p = 0; p < NUM_PAGES; p++) {
+    Serial.print("Page "); Serial.print(p+1);
+    Serial.print(": Standard Midi Ch"); Serial.println (p+1);
+  }
+  Serial.println("Sticky Controls (Master/B.O./Tempo): MIDI Ch 1");
+  Serial.println("-------------------------------------");
+
+  // --- MIDI Configuration Report ---
+  Serial.println("\n====Midi Info====");
+  Serial.println("Buttons 0-29: MIDI Notes 0-29");
+  Serial.println("Button 30 (Sticky): MIDI Note 30, Ch 1");
+  Serial.println("Button 31 (Sticky): MIDI Note 31, Ch 1");
+  Serial.println("Faders 0-7: MIDI CC 1-8");
+  Serial.println("Faders 8-9 (Sticky): MIDI CC 9-10, Ch 1");
+  Serial.println("-------------------------------------");
 }
 
 //---------------------------
@@ -193,7 +211,28 @@ void processCLI() {
   String cmd = Serial.readStringUntil('\n')
   cmd.trim();
 
+  //View Groups CMD:
+  if (cmd.equalsIgnoreCase("VG")) {
+    Serial.println("====Current Group Assignments====");
+    bool found = false;
+    for (int p =0; p < NUM_PAGES; p++) {
+      for (int i = 0; i < 32, i++) {
+        if (buttonGroups[p][i] > 0) {
+          Serial.print("Page: "); Serial.print(p + 1);
+          Serial.print("  | Button: "); Serial.print(i);
+          Serial.print("  | Group: "); Serial.println(buttonGroups[p][i]);
+          found = true;
+      
+        }
+      }
+    }
+    if (!found) Serial.println("No groups assigned.");
+    Serial.println("---------------------------------")
+  }
+
+
   // Format: "G<Page>:<Note>:<Group>" (e.g., "G1:5:2" = Page 1, Button 5, Group 2)
+  //Handle group creation/assignment
   if (cmd.startsWith("G")) {
     int firstColon = cmd.indexOf(':');
     int secondColon = cmd.indexOf(':', firstColon + 1);
@@ -208,6 +247,17 @@ void processCLI() {
         EEPROM.put(0, buttonGroups);
         Serial.println("Group Saved.");
       } 
+    }
+  }
+  //Handle Group Deletion
+  else if (cmd.startsWith("D")) {
+    int colon = cmd.indexOf(':');
+    if (colon < 0) {
+      int p = cmd.substring(1, colon).toInt() - 1;
+      buttonGroups[p][note] = 0;
+      EEPROM.put(0, buttonGroups);
+      Serial.print("Group cleared for Page "); Serial.print(p+1);
+      Serial.print(" Note "); Serial.println(note);
     }
   }
 }
